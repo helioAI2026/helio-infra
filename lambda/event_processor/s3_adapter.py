@@ -81,4 +81,21 @@ class S3Adapter:
         except ClientError as e:
             logger.error("erro ao listar objetos no s3: %s", e)
 
+    def _upload_file(self, file_path: str, s3_key: str, content_type: str) -> str | None:
+        try:
+            self.client.upload_file(
+                file_path,
+                self.bucket_name,
+                s3_key,
+                ExtraArgs={"ContentType": content_type},
+            )
+            logger.info("upload concluído: s3://%s/%s", self.bucket_name, s3_key)
+            return s3_key
+        except ClientError as e:
+            logger.error("upload falhou: %s", e)
+            return None
+        except FileNotFoundError:
+            logger.error("arquivo não encontrado: %s", file_path)
+            return None
+
         
