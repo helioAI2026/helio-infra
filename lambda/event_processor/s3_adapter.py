@@ -34,7 +34,7 @@ class S3Adapter:
                 Body=data,
                 ContentType=content_type,
             )
-            self.logger.info("upload de bytes concluído: s3://%s/%s", s3_key)
+            self.logger.info("upload de bytes concluído: s3://%s/%s", self.bucket_name, s3_key)
             return s3_key
         except ClientError as e:
             self.logger.error("erro no upload de bytes para o s3: %s", e)
