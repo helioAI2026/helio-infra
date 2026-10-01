@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Helio - infraestrutura principal (compoe os nested stacks)
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W3002 # TemplateURL local; o 'aws cloudformation package' troca por URL do S3
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: helio
+    AllowedPattern: ^[a-z][a-z0-9]{1,15}$
+    Description: Prefixo dos recursos (minusculas e numeros; usado em nome de regra IoT, que nao aceita hifen)
+  AlertEmail1:
+    Type: String
+    AllowedPattern: ^[^@\s]+@[^@\s]+$
+    Description: E-mail do gestor que recebe os alertas
+  AlertEmail2:
+    Type: String
+    Default: ""
+    AllowedPattern: ^([^@\s]+@[^@\s]+)?$
+  AlertEmail3:
+    Type: String
+    Default: ""
+    AllowedPattern: ^([^@\s]+@[^@\s]+)?$
+  DeviceThingName:
+    Type: String
+    Default: helio-edge-01
+    AllowedPattern: ^[a-zA-Z0-9:_-]+$
+  DeviceCsr:
+    Type: String
+    Description: Conteudo de certs/device.csr (gerado pelo scripts/deploy.sh)
+
+Resources:
+  Auth:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/auth.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  Data:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/data.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+
+  Api:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/api.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        UserPoolIssuer: !GetAtt Auth.Outputs.Issuer
+        UserPoolClientId: !GetAtt Auth.Outputs.UserPoolClientId
+        DriversTableName: !GetAtt Data.Outputs.DriversTableName
+        DriversTableArn: !GetAtt Data.Outputs.DriversTableArn
+        TripsTableName: !GetAtt Data.Outputs.TripsTableName
+        TripsTableArn: !GetAtt Data.Outputs.TripsTableArn
+        EventsTableName: !GetAtt Data.Outputs.EventsTableName
+        EventsTableArn: !GetAtt Data.Outputs.EventsTableArn
+        SettingsTableName: !GetAtt Data.Outputs.SettingsTableName
+        SettingsTableArn: !GetAtt Data.Outputs.SettingsTableArn
+
+  Web:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/web.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        ApiDomain: !GetAtt Api.Outputs.ApiDomain
+
+  Alerts:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/alerts.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        AlertEmail1: !Ref AlertEmail1
+        AlertEmail2: !Ref AlertEmail2
+        AlertEmail3: !Ref AlertEmail3
+        DriversTableName: !GetAtt Data.Outputs.DriversTableName
+        DriversTableArn: !GetAtt Data.Outputs.DriversTableArn
+        EventsTableName: !GetAtt Data.Outputs.EventsTableName
+        EventsTableArn: !GetAtt Data.Outputs.EventsTableArn
+        DashboardUrl: !GetAtt Web.Outputs.DashboardUrl
+
+  Iot:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: stacks/iot.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        DeviceThingName: !Ref DeviceThingName
+        DeviceCsr: !Ref DeviceCsr
+        DriversTableName: !GetAtt Data.Outputs.DriversTableName
+        DriversTableArn: !GetAtt Data.Outputs.DriversTableArn
+        TripsTableName: !GetAtt Data.Outputs.TripsTableName
+        TripsTableArn: !GetAtt Data.Outputs.TripsTableArn
+        EventsTableName: !GetAtt Data.Outputs.EventsTableName
+        EventsTableArn: !GetAtt Data.Outputs.EventsTableArn
+        SettingsTableName: !GetAtt Data.Outputs.SettingsTableName
+        SettingsTableArn: !GetAtt Data.Outputs.SettingsTableArn
+        AlertTopicArn: !GetAtt Alerts.Outputs.AlertTopicArn
+        DashboardUrl: !GetAtt Web.Outputs.DashboardUrl
+
+Outputs:
+  DashboardUrl:
+    Value: !GetAtt Web.Outputs.DashboardUrl
+  ApiEndpoint:
+    Value: !GetAtt Api.Outputs.ApiEndpoint
+  UserPoolId:
+    Value: !GetAtt Auth.Outputs.UserPoolId
+  UserPoolClientId:
+    Value: !GetAtt Auth.Outputs.UserPoolClientId
+  AlertTopicArn:
+    Value: !GetAtt Alerts.Outputs.AlertTopicArn
+  SiteBucketName:
+    Value: !GetAtt Web.Outputs.SiteBucketName
+  DistributionId:
+    Value: !GetAtt Web.Outputs.DistributionId
+  ThingName:
+    Value: !GetAtt Iot.Outputs.ThingName
+  CertificateId:
+    Value: !GetAtt Iot.Outputs.CertificateId
+  DriversTableName:
+    Value: !GetAtt Data.Outputs.DriversTableName
+  TripsTableName:
+    Value: !GetAtt Data.Outputs.TripsTableName
+  EventsTableName:
+    Value: !GetAtt Data.Outputs.EventsTableName
+  SettingsTableName:
+    Value: !GetAtt Data.Outputs.SettingsTableName
