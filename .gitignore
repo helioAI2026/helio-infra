@@ -149,3 +149,5 @@ packaged*.yaml
 *.pem
 *.key
 *.csr
+certs/
+build/
