@@ -1,0 +1,469 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Helio - API HTTP (API Gateway + Lambdas) protegida pelo Cognito
+
+Parameters:
+  ProjectName:
+    Type: String
+  UserPoolIssuer:
+    Type: String
+  UserPoolClientId:
+    Type: String
+  DriversTableName:
+    Type: String
+  DriversTableArn:
+    Type: String
+  TripsTableName:
+    Type: String
+  TripsTableArn:
+    Type: String
+  EventsTableName:
+    Type: String
+  EventsTableArn:
+    Type: String
+  SettingsTableName:
+    Type: String
+  SettingsTableArn:
+    Type: String
+
+Resources:
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${ProjectName}-api
+      ProtocolType: HTTP
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: cognito
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref UserPoolClientId
+        Issuer: !Ref UserPoolIssuer
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+
+  # ─── Motoristas ──────────────────────────────────────────────────────────
+  DriversFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !Ref DriversTableArn
+                  - !Sub ${DriversTableArn}/index/*
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !Sub ${EventsTableArn}/index/byDriver
+                  - !Sub ${TripsTableArn}/index/byDriver
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref SettingsTableArn
+
+  DriversLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-api-drivers
+      RetentionInDays: 14
+
+  DriversFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DriversLogGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]
+    Properties:
+      FunctionName: !Sub ${ProjectName}-api-drivers
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: api_drivers.handler
+      Code: ../src
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt DriversFunctionRole.Arn
+      Environment:
+        Variables:
+          DRIVERS_TABLE: !Ref DriversTableName
+          TRIPS_TABLE: !Ref TripsTableName
+          EVENTS_TABLE: !Ref EventsTableName
+          SETTINGS_TABLE: !Ref SettingsTableName
+
+  DriversPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DriversFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  DriversIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt DriversFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RouteListDrivers:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/drivers
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${DriversIntegration}
+
+  RouteCreateDriver:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/drivers
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${DriversIntegration}
+
+  RouteGetDriver:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/drivers/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${DriversIntegration}
+
+  RouteUpdateDriver:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/drivers/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${DriversIntegration}
+
+  RouteDriverHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/drivers/{id}/history
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${DriversIntegration}
+
+  # ─── Viagens ─────────────────────────────────────────────────────────────
+  TripsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource: !Ref TripsTableArn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !Sub ${TripsTableArn}/index/byDriver
+                  - !Sub ${EventsTableArn}/index/byTrip
+
+  TripsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-api-trips
+      RetentionInDays: 14
+
+  TripsFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TripsLogGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]
+    Properties:
+      FunctionName: !Sub ${ProjectName}-api-trips
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: api_trips.handler
+      Code: ../src
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt TripsFunctionRole.Arn
+      Environment:
+        Variables:
+          TRIPS_TABLE: !Ref TripsTableName
+          EVENTS_TABLE: !Ref EventsTableName
+
+  TripsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TripsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  TripsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt TripsFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RouteListTrips:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/trips
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${TripsIntegration}
+
+  RouteGetTrip:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/trips/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${TripsIntegration}
+
+  # ─── Eventos ─────────────────────────────────────────────────────────────
+  EventsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Ref EventsTableArn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub ${EventsTableArn}/index/byDay
+
+  EventsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-api-events
+      RetentionInDays: 14
+
+  EventsFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: EventsLogGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]
+    Properties:
+      FunctionName: !Sub ${ProjectName}-api-events
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: api_events.handler
+      Code: ../src
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt EventsFunctionRole.Arn
+      Environment:
+        Variables:
+          EVENTS_TABLE: !Ref EventsTableName
+
+  EventsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EventsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  EventsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt EventsFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RouteListEvents:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/events
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${EventsIntegration}
+
+  RouteGetEvent:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/events/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${EventsIntegration}
+
+  RouteAcknowledgeEvent:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /api/events/{id}/acknowledge
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${EventsIntegration}
+
+  # ─── Limiares ────────────────────────────────────────────────────────────
+  SettingsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !Ref SettingsTableArn
+
+  SettingsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-api-settings
+      RetentionInDays: 14
+
+  SettingsFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: SettingsLogGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]
+    Properties:
+      FunctionName: !Sub ${ProjectName}-api-settings
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: api_settings.handler
+      Code: ../src
+      MemorySize: 256
+      Timeout: 10
+      Role: !GetAtt SettingsFunctionRole.Arn
+      Environment:
+        Variables:
+          SETTINGS_TABLE: !Ref SettingsTableName
+
+  SettingsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SettingsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  SettingsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SettingsFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RouteGetThresholds:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /api/settings/thresholds
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${SettingsIntegration}
+
+  RoutePutThresholds:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /api/settings/thresholds
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub integrations/${SettingsIntegration}
+
+Outputs:
+  ApiId:
+    Value: !Ref HttpApi
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  ApiDomain:
+    Value: !Sub ${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
