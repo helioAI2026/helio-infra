@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Helio - tabelas DynamoDB (motoristas, viagens, eventos, configuracoes)
+
+Parameters:
+  ProjectName:
+    Type: String
+
+Resources:
+  DriversTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub ${ProjectName}-drivers
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: driverId
+          AttributeType: S
+        - AttributeName: assignedDeviceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: driverId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: byDevice
+          KeySchema:
+            - AttributeName: assignedDeviceId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  TripsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub ${ProjectName}-trips
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tripId
+          AttributeType: S
+        - AttributeName: driverId
+          AttributeType: S
+        - AttributeName: startedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tripId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: byDriver
+          KeySchema:
+            - AttributeName: driverId
+              KeyType: HASH
+            - AttributeName: startedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub ${ProjectName}-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+        - AttributeName: tripId
+          AttributeType: S
+        - AttributeName: driverId
+          AttributeType: S
+        - AttributeName: day
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: byTrip
+          KeySchema:
+            - AttributeName: tripId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: byDriver
+          KeySchema:
+            - AttributeName: driverId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: byDay
+          KeySchema:
+            - AttributeName: day
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  SettingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub ${ProjectName}-settings
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: settingId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: settingId
+          KeyType: HASH
+
+Outputs:
+  DriversTableName:
+    Value: !Ref DriversTable
+  DriversTableArn:
+    Value: !GetAtt DriversTable.Arn
+  TripsTableName:
+    Value: !Ref TripsTable
+  TripsTableArn:
+    Value: !GetAtt TripsTable.Arn
+  EventsTableName:
+    Value: !Ref EventsTable
+  EventsTableArn:
+    Value: !GetAtt EventsTable.Arn
+  SettingsTableName:
+    Value: !Ref SettingsTable
+  SettingsTableArn:
+    Value: !GetAtt SettingsTable.Arn

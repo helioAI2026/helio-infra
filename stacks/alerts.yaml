@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Helio - topico SNS de alertas por e-mail e resumo diario agendado
+
+Parameters:
+  ProjectName:
+    Type: String
+  AlertEmail1:
+    Type: String
+  AlertEmail2:
+    Type: String
+    Default: ""
+  AlertEmail3:
+    Type: String
+    Default: ""
+  DriversTableName:
+    Type: String
+  DriversTableArn:
+    Type: String
+  EventsTableName:
+    Type: String
+  EventsTableArn:
+    Type: String
+  DashboardUrl:
+    Type: String
+
+Conditions:
+  HasEmail2: !Not [!Equals [!Ref AlertEmail2, ""]]
+  HasEmail3: !Not [!Equals [!Ref AlertEmail3, ""]]
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-alerts
+      DisplayName: Helio
+
+  Email1Subscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail1
+
+  Email2Subscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail2
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail2
+
+  Email3Subscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail3
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail3
+
+  DailySummaryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: summary
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub ${EventsTableArn}/index/byDay
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref DriversTableArn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+
+  DailySummaryLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-daily-summary
+      RetentionInDays: 14
+
+  DailySummaryFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DailySummaryLogGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3002]
+    Properties:
+      FunctionName: !Sub ${ProjectName}-daily-summary
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: daily_summary.handler
+      Code: ../src
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt DailySummaryRole.Arn
+      Environment:
+        Variables:
+          EVENTS_TABLE: !Ref EventsTableName
+          DRIVERS_TABLE: !Ref DriversTableName
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          DASHBOARD_URL: !Ref DashboardUrl
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DailySummaryFunction.Arn
+
+  DailySummarySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${ProjectName}-daily-summary
+      Description: Resumo diario de alertas as 20h (Brasilia)
+      ScheduleExpression: cron(0 20 * * ? *)
+      ScheduleExpressionTimezone: America/Sao_Paulo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt DailySummaryFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: "{}"
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  DailySummaryFunctionName:
+    Value: !Ref DailySummaryFunction

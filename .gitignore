@@ -142,3 +142,12 @@ package/
 # Local development
 *.local
 local_config.py
+
+# Infra CloudFormation
+.aws-sam/
+packaged*.yaml
+*.pem
+*.key
+*.csr
+certs/
+build/
