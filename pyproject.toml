@@ -8,6 +8,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "boto3>=1.35",
+    "botocore[crt]>=1.35",
     "moto[dynamodb,sns,sqs]>=5.0",
     "pytest>=8.3",
     "cfn-lint>=1.20",
