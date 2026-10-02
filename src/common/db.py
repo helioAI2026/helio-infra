@@ -4,12 +4,22 @@ from decimal import Decimal
 import boto3
 
 _resource = None
+_client = None
 
 
 def reset() -> None:
-    """Descarta o cliente em cache (usado pelos testes a cada mock novo)."""
-    global _resource
+    """Descarta os clientes em cache (usado pelos testes a cada mock novo)."""
+    global _resource, _client
     _resource = None
+    _client = None
+
+
+def client():
+    """Cliente de baixo nível (sem serialização automática), para transações."""
+    global _client
+    if _client is None:
+        _client = boto3.client("dynamodb")
+    return _client
 
 
 def table(env_var: str):

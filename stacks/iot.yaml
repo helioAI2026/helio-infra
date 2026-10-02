@@ -92,7 +92,10 @@ Resources:
                 Action: dynamodb:Query
                 Resource: !Sub ${DriversTableArn}/index/byDevice
               - Effect: Allow
-                Action: dynamodb:PutItem
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
                 Resource: !Ref EventsTableArn
               - Effect: Allow
                 Action: dynamodb:UpdateItem

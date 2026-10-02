@@ -1,21 +1,30 @@
 """Envia por e-mail (SNS) o resumo de alertas do dia, agendado pelo EventBridge Scheduler às 20h de Brasília."""
 
 import os
-from datetime import date
+from datetime import date, timedelta
 
 from boto3.dynamodb.conditions import Key
 
 from common.db import plain, query_all, table
 from common.notify import publish
-from common.timeutil import brt_day, now_utc
+from common.timeutil import brt_day, brt_days, format_brt, now_utc, to_utc_iso
 
 
 def handler(event, context):
-    day = (event or {}).get("day") or brt_day(now_utc())
-    rows = [
-        plain(r)
-        for r in query_all(table("EVENTS_TABLE"), IndexName="byDay", KeyConditionExpression=Key("day").eq(day))
-    ]
+    """Sem `day`: cobre as últimas 24h (a execução das 20h pega também a noite anterior). Com `day`: o dia inteiro."""
+    requested = (event or {}).get("day")
+    now = now_utc()
+    if requested:
+        day, days, window = requested, [requested], None
+    else:
+        start = now - timedelta(hours=24)
+        day, days = brt_day(now), brt_days(start, now)
+        window = Key("timestamp").between(to_utc_iso(start), to_utc_iso(now))
+
+    rows = []
+    for d in days:
+        condition = Key("day").eq(d) & window if window else Key("day").eq(d)
+        rows += [plain(r) for r in query_all(table("EVENTS_TABLE"), IndexName="byDay", KeyConditionExpression=condition)]
 
     totals = {}
     for row in rows:
@@ -25,7 +34,8 @@ def handler(event, context):
         entry["worst"] = max(entry["worst"], row["score"])
 
     shown = date.fromisoformat(day).strftime("%d/%m/%Y")
-    lines = [f"Resumo de alertas de sonolência de {shown}.", ""]
+    period = f"de {shown}" if requested else f"das últimas 24 horas (até {format_brt(now)})"
+    lines = [f"Resumo de alertas de sonolência {period}.", ""]
     if rows:
         lines += [f"Total de alertas: {len(rows)}", ""]
         for key, entry in sorted(totals.items(), key=lambda kv: (-kv[1]["count"], kv[0])):

@@ -31,3 +31,16 @@ def test_summary_without_events_still_sends(aws, sent_emails):
 def test_default_day_is_today_in_brazil(aws, sent_emails, monkeypatch):
     monkeypatch.setattr(daily_summary, "now_utc", lambda: datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc))
     assert daily_summary.handler({}, None)["day"] == "2026-10-01"
+
+
+def test_scheduled_run_covers_last_24_hours(aws, sent_emails, monkeypatch):
+    # 20:00 em Brasília do dia 02
+    monkeypatch.setattr(daily_summary, "now_utc", lambda: datetime(2026, 10, 2, 23, 0, tzinfo=timezone.utc))
+    put_event("evening", timestamp="2026-10-02T00:30:00.000Z", day="2026-10-01", score=80)  # 21:30 do dia 01
+    put_event("today", timestamp="2026-10-02T15:00:00.000Z", day="2026-10-02", score=60)
+    put_event("too-old", timestamp="2026-10-01T22:00:00.000Z", day="2026-10-01", score=99)  # 19:00 do dia 01
+    assert daily_summary.handler({}, None) == {"day": "2026-10-02", "events": 2}
+    [mail] = sent_emails()
+    assert mail["Subject"] == "[Helio] Resumo diario 02/10/2026"
+    assert "pior score 80" in mail["Message"]
+    assert "últimas 24 horas" in mail["Message"]

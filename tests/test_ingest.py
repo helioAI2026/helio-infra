@@ -121,3 +121,50 @@ def test_uses_stored_thresholds(aws):
     save_thresholds({**DEFAULT_THRESHOLDS, "drowsy": 75, "critical": 90})
     ingest.handler(iot_message(alert_item(score=0.72)), None)
     assert stored_events()[0]["severity"] == "mild"
+
+
+def test_event_carries_driver_vehicle(aws):
+    put_driver("drv_ana", "Ana Souza", device=THING, assignedVehicleId="veh_1")
+    ingest.handler(iot_message(alert_item()), None)
+    assert stored_events()[0]["vehicleId"] == "veh_1"
+
+
+def _fail_once(monkeypatch, name):
+    original = getattr(ingest, name)
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("falha transitória")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ingest, name, flaky)
+
+
+def test_retry_after_trip_failure_keeps_trip_consistent(aws, monkeypatch):
+    ingest.handler(iot_message(alert_item(timestamp="2026-10-01T22:20:00-03:00", score=0.65)), None)
+    _fail_once(monkeypatch, "_set_if")
+    message = iot_message(alert_item(timestamp="2026-10-01T22:10:00-03:00", score=0.9))
+    try:
+        ingest.handler(message, None)
+    except RuntimeError:
+        pass
+    ingest.handler(message, None)  # nova tentativa da Lambda
+    trip = stored_trip()
+    assert trip["alertCount"] == 2
+    assert trip["maxScore"] == 90
+    assert trip["startedAt"] == "2026-10-02T01:10:00.000Z"
+
+
+def test_retry_after_email_failure_still_emails_once(aws, sent_emails, monkeypatch):
+    _fail_once(monkeypatch, "publish")
+    message = iot_message(alert_item(score=0.95))
+    try:
+        ingest.handler(message, None)
+    except RuntimeError:
+        pass
+    ingest.handler(message, None)
+    ingest.handler(message, None)
+    assert len(sent_emails()) == 1
+    assert stored_trip()["alertCount"] == 1

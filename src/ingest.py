@@ -5,19 +5,22 @@ import logging
 import os
 
 from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
-from common.db import query_all, table, to_item
+from common.db import client, query_all, table, to_item
 from common.notify import publish
 from common.settings import load_thresholds
 from common.severity import LABELS, at_least, normalize_score, severity_for
-from common.timeutil import brt_day, format_brt, parse_iso, to_utc_iso
+from common.timeutil import brt_day, format_brt, now_utc, parse_iso, to_utc_iso
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 EAR_THRESHOLD = float(os.environ.get("EAR_THRESHOLD", "0.20"))
 PERCLOS_TRIGGER = float(os.environ.get("PERCLOS_TRIGGER", "0.20"))
+
+_serializer = TypeSerializer()
 
 
 def handler(event, context):
@@ -36,12 +39,13 @@ def handler(event, context):
         if item is None:
             logger.warning("Item inválido descartado: %s", raw)
             continue
-        if not _insert_event(item):
-            continue
-        _update_trip(item)
-        stored += 1
+        # Cada passo é idempotente: se a Lambda falhar no meio, a nova tentativa completa o que faltou.
+        inserted = _record(item)
+        _apply_trip_bounds(item)
+        if inserted:
+            stored += 1
         if thresholds["emailAlerts"] and at_least(item["severity"], thresholds["notifyOn"]):
-            _notify(item, driver)
+            _notify_once(item, driver, inserted)
     return {"stored": stored}
 
 
@@ -78,6 +82,7 @@ def _build_event(raw, device_id, ride_id, driver, thresholds):
         "tripId": ride_id,
         "deviceId": device_id,
         "driverId": driver["driverId"] if driver else None,
+        "vehicleId": driver.get("assignedVehicleId") if driver else None,
         "timestamp": timestamp,
         "day": brt_day(moment),
         "score": score,
@@ -99,20 +104,8 @@ def _driver_for_device(device_id):
     return found[0] if found else None
 
 
-def _insert_event(item) -> bool:
-    try:
-        table("EVENTS_TABLE").put_item(Item=to_item(item), ConditionExpression="attribute_not_exists(eventId)")
-        return True
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-            raise
-        logger.info("Evento %s já registrado (reentrega)", item["eventId"])
-        return False
-
-
-def _update_trip(item) -> None:
-    trips = table("TRIPS_TABLE")
-    key = {"tripId": item["tripId"]}
+def _record(item) -> bool:
+    """Grava o evento e soma 1 à viagem na mesma transação. Retorna False se o evento já existia."""
     values = {":device": item["deviceId"], ":t": item["timestamp"], ":score": item["score"], ":one": 1}
     expression = (
         "SET deviceId = :device, startedAt = if_not_exists(startedAt, :t), "
@@ -121,7 +114,50 @@ def _update_trip(item) -> None:
     if item["driverId"]:
         expression += ", driverId = :driver"
         values[":driver"] = item["driverId"]
-    trips.update_item(Key=key, UpdateExpression=expression + " ADD alertCount :one", ExpressionAttributeValues=values)
+    try:
+        client().transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": os.environ["EVENTS_TABLE"],
+                        "Item": _serialize(to_item(item)),
+                        "ConditionExpression": "attribute_not_exists(eventId)",
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": os.environ["TRIPS_TABLE"],
+                        "Key": _serialize({"tripId": item["tripId"]}),
+                        "UpdateExpression": expression + " ADD alertCount :one",
+                        "ExpressionAttributeValues": _serialize(values),
+                    }
+                },
+            ]
+        )
+        return True
+    except ClientError as exc:
+        if not _is_duplicate(exc):
+            raise
+        logger.info("Evento %s já registrado (reentrega)", item["eventId"])
+        return False
+
+
+def _serialize(values: dict) -> dict:
+    return {k: _serializer.serialize(v) for k, v in values.items()}
+
+
+def _is_duplicate(exc: ClientError) -> bool:
+    if exc.response["Error"]["Code"] != "TransactionCanceledException":
+        return False
+    codes = [r.get("Code") for r in exc.response.get("CancellationReasons", [])]
+    if codes:
+        return codes[0] == "ConditionalCheckFailed"
+    return "ConditionalCheckFailed" in exc.response["Error"].get("Message", "")
+
+
+def _apply_trip_bounds(item) -> None:
+    key = {"tripId": item["tripId"]}
+    trips = table("TRIPS_TABLE")
     _set_if(trips, key, "maxScore", item["score"], "<")
     _set_if(trips, key, "lastEventAt", item["timestamp"], "<")
     _set_if(trips, key, "startedAt", item["timestamp"], ">")
@@ -139,6 +175,20 @@ def _set_if(trips, key, attribute, value, comparison) -> None:
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
+
+
+def _notify_once(item, driver, inserted) -> None:
+    """Envia o e-mail e marca notifiedAt; numa reentrega, só reenvia se a marca não existir."""
+    events = table("EVENTS_TABLE")
+    key = {"eventId": item["eventId"]}
+    if not inserted:
+        existing = events.get_item(Key=key, ConsistentRead=True).get("Item") or {}
+        if existing.get("notifiedAt"):
+            return
+    _notify(item, driver)
+    events.update_item(
+        Key=key, UpdateExpression="SET notifiedAt = :t", ExpressionAttributeValues={":t": to_utc_iso(now_utc())}
+    )
 
 
 def _notify(item, driver) -> None:
